@@ -23,11 +23,11 @@ Con [Homebrew](https://brew.sh) (recomendado):
 brew install frederickknight/tap/git-park
 ```
 
-Se actualiza con `brew upgrade`. Para los alias cortos `park`, `memo` y `kit`, agrega
+Se actualiza con `brew upgrade`. Para los alias cortos `park`, `memo`, `kit` y `twin`, agrega
 a tu `~/.zshrc`:
 
 ```bash
-alias park='git park' memo='git memo' kit='git kit'
+alias park='git park' memo='git memo' kit='git kit' twin='git twin'
 ```
 
 Sin Homebrew, en una linea (instala en `~/.local/bin` y agrega los alias y el PATH a
@@ -63,7 +63,7 @@ $bin = "$env:USERPROFILE\bin"
 $p = [Environment]::GetEnvironmentVariable("Path", "User")
 if (";$p;" -notlike "*;$bin;*") { [Environment]::SetEnvironmentVariable("Path", "$bin;$p", "User") }
 if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-Add-Content $PROFILE "`nfunction park { git park @args }`nfunction memo { git memo @args }`nfunction kit { git kit @args }"
+Add-Content $PROFILE "`nfunction park { git park @args }`nfunction memo { git memo @args }`nfunction kit { git kit @args }`nfunction twin { git twin @args }"
 ```
 
 Cierra y abre PowerShell (y VS Code, si usas su terminal). En PowerShell, una nota con

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Instala (o actualiza) git-park, git-memo, git-up, git-twin y git-kit.
 #
-#   ./install.sh                copia los scripts, agrega los alias park, memo y kit
+#   ./install.sh                copia los scripts, agrega los alias park, memo, kit y twin
 #                               y, si hace falta, la carpeta al PATH (en .zshrc o .bashrc)
 #   ./install.sh --no-aliases   lo mismo sin los alias
 #
@@ -62,7 +62,7 @@ main() {
 
   if [ "$1" != --no-aliases ]; then
     touch "$rc"
-    for a in park memo kit; do
+    for a in park memo kit twin; do
       if grep -q "^alias $a=" "$rc"; then echo "alias $a: ya estaba en $rc"
       else echo "alias $a='git $a'" >> "$rc"; echo "alias $a: agregado a $rc"; changed=1; fi
     done
