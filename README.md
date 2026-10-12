@@ -13,28 +13,92 @@ corren igual en macOS, Linux y Windows (Git Bash o PowerShell). Requieren git 2.
 
 ## Instalacion
 
+Necesitas git 2.38 o mayor (`git --version`).
+
+### macOS
+
+Con [Homebrew](https://brew.sh) (recomendado):
+
+```bash
+brew install frederickknight/tap/git-park
+```
+
+Se actualiza con `brew upgrade`. Para los alias cortos `park`, `memo` y `kit`, agrega
+a tu `~/.zshrc`:
+
+```bash
+alias park='git park' memo='git memo' kit='git kit'
+```
+
+Sin Homebrew, en una linea (instala en `~/.local/bin` y agrega los alias y el PATH a
+tu `~/.zshrc`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FrederickKnight/git-park/main/install.sh | sh
+```
+
+### Linux
+
+Igual que en macOS: `brew install frederickknight/tap/git-park` si usas Homebrew, o la
+linea de `curl` (escribe en `~/.bashrc`, o en `~/.zshrc` si tu shell es zsh).
+
+### Windows
+
+Necesitas [Git for Windows](https://git-scm.com/download/win), que trae Git Bash.
+
+**1.** Abre **Git Bash** y corre:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FrederickKnight/git-park/main/install.sh | sh
+```
+
+Instala en `~/bin` (`C:\Users\<tu usuario>\bin`) y agrega los alias a `~/.bashrc`.
+Cierra y abre Git Bash: ya funciona ahi.
+
+**2.** Para usarlo tambien en **PowerShell**, corre esto una vez en PowerShell. Agrega la
+carpeta al PATH de tu usuario y los alias a tu perfil:
+
+```powershell
+$bin = "$env:USERPROFILE\bin"
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+if (";$p;" -notlike "*;$bin;*") { [Environment]::SetEnvironmentVariable("Path", "$bin;$p", "User") }
+if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+Add-Content $PROFILE "`nfunction park { git park @args }`nfunction memo { git memo @args }`nfunction kit { git kit @args }"
+```
+
+Cierra y abre PowerShell (y VS Code, si usas su terminal). En PowerShell, una nota con
+`;`, `|` o `&` necesita comillas: `memo "probar a & b"`.
+
+### Comprobar que funciona
+
+En cualquier repo:
+
+```bash
+git park help
+```
+
+Ojo: `git park --help` no sirve, porque git intercepta `--help` y busca un manual.
+
+### Actualizar
+
+- Homebrew: `brew upgrade git-park`
+- curl: corre la misma linea otra vez (no duplica los alias ni el PATH)
+
+### Otras opciones del instalador
+
+`sh -s -- --no-aliases` instala sin los alias. `PARK_BIN=/ruta` elige otra carpeta y
+`PARK_REF=v0.1.0` instala una version concreta en lugar de `main`. Las variables van
+antes de `sh`: `curl ... | PARK_REF=v0.1.0 sh`.
+
+Desde un clon, para modificar los scripts:
+
 ```bash
 git clone https://github.com/FrederickKnight/git-park.git
 cd git-park
-./install.sh --aliases
+./install.sh
 ```
-
-Copia los scripts a `~/.local/bin` (macOS, Linux) o `~/bin` (Git Bash) y, con
-`--aliases`, agrega `park`, `memo` y `kit` a tu `.zshrc` o `.bashrc`. Si la carpeta
-no esta en tu PATH, el instalador te lo dice. Otra carpeta: `PARK_BIN=/ruta ./install.sh`.
 
 Para actualizar: `git pull && ./install.sh`.
-
-**PowerShell**: instala desde Git Bash, agrega `%USERPROFILE%\bin` al PATH de Windows
-y pon esto en tu `$PROFILE`:
-
-```powershell
-function park { git park @args }
-function memo { git memo @args }
-function kit  { git kit @args }
-```
-
-En PowerShell, una nota con `;`, `|` o `&` necesita comillas.
 
 ## Configuracion
 
