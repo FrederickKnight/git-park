@@ -1,0 +1,60 @@
+#!/bin/sh
+# git up: actualiza ramas locales desde el remoto sin cambiar de rama. Nunca fuerza.
+#
+#   git up              actualiza las ramas de park.upBranches (por defecto, la rama base)
+#   git up main staging actualiza las indicadas
+#
+# Configuracion con git config (global o por repo):
+#   park.upBranches  ramas a actualizar, separadas por espacio: "main staging"
+#   park.base        rama base; por defecto la de origin/HEAD, luego main o master
+#   park.remote      remoto (origin)
+
+cfg() { git config --get "$1" 2>/dev/null; }
+exists() { git show-ref -q --verify "refs/heads/$1"; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "no estas dentro de un repo de git"; exit 1; }
+
+remote=$(cfg park.remote); remote=${remote:-origin}
+if [ $# -gt 0 ]; then branches="$*"
+else
+  branches=$(git config --get-all park.upBranches 2>/dev/null | tr '\n' ' ')
+  if [ -z "${branches# }" ]; then
+    branches=$(cfg park.base)
+    if [ -z "$branches" ]; then
+      branches=$(git symbolic-ref -q --short "refs/remotes/$remote/HEAD" 2>/dev/null)
+      branches=${branches#"$remote"/}
+    fi
+    if [ -z "$branches" ]; then
+      if exists master && ! exists main; then branches=master; else branches=main; fi
+    fi
+  fi
+fi
+
+cur=$(git branch --show-current)
+fail=0
+for b in $branches; do
+  if ! git fetch -q "$remote" "$b" 2>/dev/null; then
+    echo "$b: no se pudo bajar de $remote (no existe ahi, o no hay conexion)"; fail=1; continue
+  fi
+  if ! exists "$b"; then
+    if git branch -q "$b" "$remote/$b" 2>/dev/null; then echo "$b: creada desde $remote/$b"
+    else echo "$b: no se pudo crear en local"; fail=1; fi
+    continue
+  fi
+  before=$(git rev-parse "refs/heads/$b")
+  if [ "$b" = "$cur" ]; then
+    # la rama actual no se puede actualizar con fetch: se avanza con merge --ff-only
+    if ! git merge -q --ff-only "$remote/$b" 2>/dev/null; then
+      echo "$b: no se pudo avanzar (tiene commits propios o cambios sin commitear que chocan)"; fail=1; continue
+    fi
+  # fetch rechaza solo si no es fast-forward o si la rama esta abierta en otro worktree
+  elif ! git fetch -q "$remote" "$b:$b" 2>/dev/null; then
+    echo "$b: no se pudo avanzar (tiene commits que $remote no tiene, o esta abierta en otro worktree)"; fail=1; continue
+  fi
+  after=$(git rev-parse "refs/heads/$b")
+  if [ "$before" = "$after" ]; then echo "$b: al dia"
+  else
+    n=$(git rev-list --count "$before..$after")
+    if [ "$n" = 1 ]; then echo "$b: 1 commit nuevo"; else echo "$b: $n commits nuevos"; fi
+  fi
+done
+exit $fail

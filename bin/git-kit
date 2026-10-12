@@ -1,0 +1,263 @@
+#!/bin/sh
+# git kit: atajos de ramas y stash.
+#
+#   git kit <atajo> [args]      p.ej. git kit new mi-rama
+#
+# Con el alias de shell kit='git kit' queda como: kit new mi-rama
+#
+# Configuracion con git config (global o por repo), compartida con git park:
+#   park.base    rama base; por defecto la de origin/HEAD, luego main o master
+#   park.remote  remoto (origin)
+#   park.storyPattern, park.staleDays y park.color tambien aplican (ver git park)
+
+usage() {
+  cat <<'USO'
+uso: git kit <comando> [args]     (entre parentesis, la forma corta)
+
+  new <rama>     (sm)  crea la rama desde la base del remoto, recien bajada
+  here <rama>    (sc)  crea la rama desde donde estas parado
+  del <rama>     (bd)  borra la rama en local y en el remoto, y limpia su entrada en git park
+  redo <rama>    (rc)  borra la rama (local y remoto) y la recrea desde donde estas parado
+  save [mensaje] (ss)  stash de todo, incluido lo no trackeado (sin mensaje: wip <rama>)
+  list           (sl)  lista los stashes: selector, fecha relativa y descripcion
+  pop [n]        (sp)  recupera el stash n (por defecto 0, el ultimo)
+  drop <n>       (sd)  borra el stash n (exige el indice)
+  where          (bc)  imprime la rama actual
+  mine [base]          commits de HEAD que no estan en la base, y el cherry-pick listo
+
+  now            (st)  resumen de la rama: commits, push pendiente, cambios, stashes y notas
+  recent [n]           ultimas ramas en las que estuviste; con n, salta a esa
+  gone [--delete]      ramas locales cuyo remoto ya no existe; con --delete las borra
+  stale [dias]         ramas locales sin commits en esos dias (por defecto park.staleDays)
+
+  lock [rama]          bloquea la rama (la actual si no indicas): del, redo y gone no la borran
+  unlock [rama]        la libera
+  locks                lista las ramas bloqueadas
+USO
+}
+
+cfg() { git config --get "$1" 2>/dev/null; }
+need() { [ -n "$1" ] || { echo "uso: git kit $cmd $2"; exit 1; }; }
+index() { case "$1" in ''|*[!0-9]*) echo "uso: git kit $cmd $2"; exit 1 ;; esac; }
+setup() {
+  remote=$(cfg park.remote); remote=${remote:-origin}
+  base=$(cfg park.base)
+  if [ -z "$base" ]; then
+    base=$(git symbolic-ref -q --short "refs/remotes/$remote/HEAD" 2>/dev/null)
+    base=${base#"$remote"/}
+  fi
+  if [ -z "$base" ]; then
+    if git show-ref -q --verify "refs/remotes/$remote/master" &&
+       ! git show-ref -q --verify "refs/remotes/$remote/main"; then base=master; else base=main; fi
+  fi
+}
+lockfile() { echo "$(git rev-parse --path-format=absolute --git-common-dir)/locked-branches"; }
+is_locked() { lf=$(lockfile); [ -f "$lf" ] && grep -qxF -e "$1" "$lf"; }
+# no se borra por descuido la rama base ni una rama bloqueada
+guard() {
+  [ "$1" != "$base" ] || { echo "$1 es la rama base; no se borra con git kit $cmd"; exit 1; }
+  if is_locked "$1"; then echo "$1 esta bloqueada (git kit unlock $1 para liberarla)"; exit 1; fi
+}
+# borra la rama del remoto solo si esta ahi; una rama que nunca se subio no es un error
+remote_del() {
+  git ls-remote --exit-code --heads "$remote" "$1" >/dev/null 2>&1
+  case $? in
+    0) git push -q "$remote" --delete "$1" || echo "  ${yellow}!$reset no se pudo borrar $1 en $remote" ;;
+    2) echo "  ${dim}$1 no estaba en $remote$reset" ;;
+    *) echo "  ${yellow}!$reset no se pudo consultar $remote; $1 puede seguir ahi" ;;
+  esac
+}
+park_clean() { [ -x "$(dirname "$0")/git-park" ] && "$(dirname "$0")/git-park" _clean quick; return 0; }
+
+plural() { if [ "$1" = 1 ]; then echo "1 $2"; else echo "$1 $3"; fi; }
+repo() { git rev-parse --git-dir >/dev/null 2>&1 || { echo "no estas dentro de un repo de git"; exit 1; }; }
+bold= dim= cyan= green= yellow= reset=
+case "$(cfg park.color)" in
+  always) usecolor=1 ;;
+  never) usecolor= ;;
+  *) usecolor=; [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && usecolor=1 ;;
+esac
+if [ -n "$usecolor" ]; then
+  esc=$(printf '\033')
+  bold="${esc}[1m"; dim="${esc}[2m"; cyan="${esc}[36m"
+  green="${esc}[32m"; yellow="${esc}[33m"; reset="${esc}[0m"
+fi
+
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  ""|-h|--help|help) usage ;;
+  new|sm)
+    need "$1" "<rama>"; setup
+    git fetch -q "$remote" "$base" && git switch -c "$1" --no-track "$remote/$base" ;;
+  here|sc)
+    need "$1" "<rama>"; git switch -c "$1" ;;
+  del|bd)
+    need "$1" "<rama>"; setup; guard "$1"
+    git branch -D "$1" || exit 1
+    remote_del "$1"
+    park_clean ;;
+  redo|rc)
+    need "$1" "<rama>"; setup; guard "$1"
+    # una vez borrada en local se recrea siempre, pase lo que pase en el remoto
+    git branch -D "$1" || exit 1
+    remote_del "$1"
+    git switch -c "$1" ;;
+  save|ss)
+    git stash push -u -m "${1:-wip $(git branch --show-current)}" ;;
+  list|sl)
+    git stash list --format='%gd  %cr  %gs' ;;
+  pop|sp)
+    n=${1:-0}; index "$n" "[n]"; git stash pop "stash@{$n}" ;;
+  drop|sd)
+    index "$1" "<n>"; git stash drop "stash@{$1}" ;;
+  where|bc)
+    git branch --show-current ;;
+  mine)
+    setup; from=${1:-$remote/$base}
+    git log --oneline --no-merges --reverse "$from..HEAD" || exit 1
+    h=$(git log --format=%h --no-merges --reverse "$from..HEAD" | tr '\n' ' ')
+    h=${h% }
+    [ -n "$h" ] && printf '\ngit cherry-pick %s\n' "$h" ;;
+  now|st)
+    repo; setup
+    cur=$(git branch --show-current)
+    if [ -z "$cur" ]; then
+      echo "${bold}${cyan}HEAD suelto$reset  $dim$(git rev-parse --short HEAD 2>/dev/null)$reset"
+    else
+      story=; pattern=$(cfg park.storyPattern)
+      [ -n "$pattern" ] && story=$(printf '%s\n' "$cur" | grep -oE -e "$pattern" | head -n 1)
+      echo "${bold}${cyan}${cur##*/}${reset}${story:+  $dim$story$reset}"
+    fi
+    # commits sobre la base y contra el upstream
+    line=
+    if [ "$cur" != "$base" ] && git show-ref -q --verify "refs/remotes/$remote/$base"; then
+      line="$(plural "$(git rev-list --count --no-merges "$remote/$base..HEAD")" commit commits) sobre $base"
+    fi
+    if up=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null); then
+      lr=$(git rev-list --left-right --count '@{u}...HEAD')
+      behind=${lr%%[!0-9]*}; ahead=${lr##*[!0-9]}
+      if [ "$ahead" = 0 ] && [ "$behind" = 0 ]; then line="${line:+$line, }al dia con $up"; fi
+      [ "$ahead" = 0 ] || line="${line:+$line, }${yellow}$ahead sin push$reset"
+      [ "$behind" = 0 ] || line="${line:+$line, }${yellow}$behind sin bajar$reset"
+    elif [ -n "$cur" ]; then
+      line="${line:+$line, }${dim}sin upstream$reset"
+    fi
+    [ -n "$line" ] && echo "$line"
+    # cambios en el working tree
+    git status --porcelain | awk -v G="$green" -v Y="$yellow" -v Z="$reset" '
+      { x = substr($0, 1, 1); y = substr($0, 2, 1)
+        if (x == "?") u++; else { if (x != " ") s++; if (y != " ") m++ } }
+      END {
+        if (!NR) { print G "limpio" Z; exit }
+        o = ""
+        if (s) o = s " en stage"
+        if (m) o = o (o == "" ? "" : ", ") m (m == 1 ? " modificado" : " modificados")
+        if (u) o = o (o == "" ? "" : ", ") u " sin trackear"
+        print Y o Z
+      }'
+    # stashes y notas de esta rama, y si esta estacionada
+    if [ -n "$cur" ]; then
+      extra=
+      n=$(git stash list | grep -ciF -e " on $cur:")
+      [ "$n" = 0 ] || extra=$(plural "$n" stash stashes)
+      dir=$(git rev-parse --path-format=absolute --git-common-dir)
+      if [ -f "$dir/memos" ]; then
+        n=$(awk -F'\t' -v b="$cur" '$2 == b { n++ } END { print n + 0 }' "$dir/memos")
+        [ "$n" = 0 ] || extra="${extra:+$extra, }$(plural "$n" nota notas)"
+      fi
+      if [ -f "$dir/parked-branches" ] && cut -f1 "$dir/parked-branches" | grep -qxF -e "$cur"; then
+        extra="${extra:+$extra, }estacionada"
+      fi
+      is_locked "$cur" && extra="${extra:+$extra, }bloqueada"
+      [ -n "$extra" ] && echo "$dim$extra$reset"
+    fi
+    files=$(git status --short)
+    if [ -n "$files" ]; then echo; printf '%s\n' "$files" | sed 's/^/  /'; fi ;;
+  recent)
+    repo
+    cur=$(git branch --show-current)
+    # ramas que aun existen, en el orden en que las visitaste (segun el reflog)
+    list=$({ git for-each-ref --format='%(refname:short)' refs/heads; echo; git reflog -n 1000 --format=%gs; } |
+      awk -v cur="$cur" '
+        !sep { if ($0 == "") sep = 1; else ok[$0] = 1; next }
+        /^checkout: moving from / {
+          b = $0; sub(/^checkout: moving from .* to /, "", b)
+          if (ok[b] && b != cur && !seen[b]++) { print b; if (++n == 10) exit }
+        }')
+    [ -n "$list" ] || { echo "  $dim(sin ramas recientes)$reset"; exit 0; }
+    if [ -n "$1" ]; then
+      index "$1" "[n]"
+      b=$(printf '%s\n' "$list" | awk -v n="$1" 'NR == n + 1')
+      [ -n "$b" ] || { echo "no hay indice $1"; exit 1; }
+      git switch "$b"
+    else
+      n=0
+      printf '%s\n' "$list" | while IFS= read -r b; do
+        echo "  $dim$n$reset  $bold$cyan$b$reset  $dim($(git log -1 --format=%cr "$b"))$reset"
+        n=$((n + 1))
+      done
+    fi ;;
+  gone)
+    repo; setup
+    git fetch -q --prune "$remote" 2>/dev/null ||
+      echo "  ${yellow}!$reset no se pudo hacer fetch, se usa lo ultimo descargado"
+    cur=$(git branch --show-current)
+    list=$(git for-each-ref --format='%(refname:short)%09%(upstream:track)' refs/heads |
+      awk -F'\t' '$2 == "[gone]" { print $1 }')
+    [ -n "$list" ] || { echo "  $dim(ninguna rama con el remoto borrado)$reset"; exit 0; }
+    if [ "$1" = --delete ]; then
+      printf '%s\n' "$list" | while IFS= read -r b; do
+        if [ "$b" = "$cur" ]; then echo "  no se borra $b: estas parado en ella"
+        elif [ "$b" = "$base" ]; then echo "  no se borra $b: es la rama base"
+        elif is_locked "$b"; then echo "  no se borra $b: esta bloqueada"
+        else git branch -q -D "$b" && echo "  borrada: $b"; fi
+      done
+      park_clean
+    else
+      printf '%s\n' "$list" | while IFS= read -r b; do
+        echo "  $bold$cyan$b$reset  $dim($(git log -1 --format=%cr "$b"))$reset"
+      done
+      echo; echo "  ${dim}git kit gone --delete para borrarlas$reset"
+    fi ;;
+  stale)
+    repo; setup
+    days=${1:-$(cfg park.staleDays)}
+    case "$days" in ''|*[!0-9]*) days=7 ;; esac
+    git for-each-ref --sort=committerdate --format='%(committerdate:short)%09%(refname:short)' refs/heads |
+      awk -F'\t' -v T="$(date +%Y-%m-%d)" -v W="$days" -v base="$base" -v cur="$(git branch --show-current)" \
+        -v B="$bold" -v C="$cyan" -v D="$dim" -v Y="$yellow" -v Z="$reset" '
+        function dnum(s,   y, m, d, era, yoe, doy) {
+          y = substr(s, 1, 4) + 0; m = substr(s, 6, 2) + 0; d = substr(s, 9, 2) + 0
+          if (m <= 2) y--
+          era = int(y / 400); yoe = y - era * 400
+          doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+          return era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        }
+        $2 == base { next }
+        { a = dnum(T) - dnum($1)
+          if (a >= W) { n++; print "  " D "[" $1 "]" Z "  " B C $2 Z ($2 == cur ? " *" : "") "  " Y "(hace " a " dias)" Z } }
+        END { if (!n) print "  " D "(ninguna rama con " W " dias o mas sin commits)" Z }' ;;
+  lock)
+    repo; b=${1:-$(git branch --show-current)}
+    [ -n "$b" ] || { echo "no estas en una rama"; exit 1; }
+    git show-ref -q --verify "refs/heads/$b" || { echo "no existe la rama $b"; exit 1; }
+    if is_locked "$b"; then echo "ya estaba bloqueada: $b"
+    else echo "$b" >> "$(lockfile)"; echo "bloqueada: $b"; fi ;;
+  unlock)
+    repo; b=${1:-$(git branch --show-current)}
+    [ -n "$b" ] || { echo "no estas en una rama"; exit 1; }
+    is_locked "$b" || { echo "no estaba bloqueada: $b"; exit 0; }
+    lf=$(lockfile)
+    awk -v b="$b" '$0 != b' "$lf" > "$lf.tmp" && mv "$lf.tmp" "$lf"
+    echo "liberada: $b" ;;
+  locks)
+    repo; lf=$(lockfile)
+    [ -s "$lf" ] || { echo "  $dim(sin ramas bloqueadas)$reset"; exit 0; }
+    while IFS= read -r b; do
+      if git show-ref -q --verify "refs/heads/$b"; then echo "  $bold$cyan$b$reset"
+      else echo "  $dim$b (ya no existe)$reset"; fi
+    done < "$lf" ;;
+  *)
+    echo "comando desconocido: $cmd"; echo; usage; exit 1 ;;
+esac

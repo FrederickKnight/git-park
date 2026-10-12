@@ -1,0 +1,3 @@
+#!/bin/sh
+# git memo: notas por rama; vive dentro de git-park, que debe estar en la misma carpeta
+exec "$(dirname "$0")/git-park" memo "$@"
