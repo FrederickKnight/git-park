@@ -4,10 +4,13 @@
 #   git park ...        lista manual de ramas estacionadas (estilo git stash list)
 #   git park -t         lo mismo, con el estado de cada rama contra park.twinTargets
 #   git memo ...   notas cortas ligadas a la rama donde se escribieron, o globales
+#   --plain        salida estable separada por tabs, sin colores (para scripts)
 #
 # Portable: sh POSIX + git 2.38 o mayor. Corre igual en macOS, Linux y Git for Windows.
 # No usa sed -i, date -j, find ni sort (en Windows los dos ultimos pueden resolver a
 # los de System32). La salida es solo ASCII.
+#
+# Salida: "+" hecho, "-" quitado, "!" aviso, "x" error (a stderr).
 #
 # Configuracion con git config (global o por repo):
 #   park.base          rama destino; por defecto la de origin/HEAD, luego main o master
@@ -32,6 +35,7 @@ tab=$(printf '\t')
 today=$(date +%Y-%m-%d)
 gmemos="$HOME/.memos"
 nested=
+plain=
 
 cfg() { git config --get "$1" 2>/dev/null; }
 
@@ -41,21 +45,43 @@ pattern=$(cfg park.storyPattern)
 root=$(git config --type=path --get park.root 2>/dev/null)
 root=${root:-$PARK_ROOT}
 
-# colores: solo en terminal, salvo que park.color diga otra cosa
-bold= dim= cyan= green= yellow= red= reset=
-case "$(cfg park.color)" in
-  always) usecolor=1 ;;
-  never) usecolor= ;;
-  *) usecolor=; [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && usecolor=1 ;;
-esac
-if [ -n "$usecolor" ]; then
-  esc=$(printf '\033')
-  bold="${esc}[1m"; dim="${esc}[2m"; cyan="${esc}[36m"
-  green="${esc}[32m"; yellow="${esc}[33m"; red="${esc}[31m"; reset="${esc}[0m"
-fi
+# colores y ancho: solo en terminal, salvo que park.color diga otra cosa; nada con --plain
+bold= dim= cyan= green= yellow= red= reset= cols=0
+setup_out() {
+  [ -z "$plain" ] || return 0
+  case "$(cfg park.color)" in
+    always) usecolor=1 ;;
+    never) usecolor= ;;
+    *) usecolor=; [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && usecolor=1 ;;
+  esac
+  if [ -n "$usecolor" ]; then
+    esc=$(printf '\033')
+    bold="${esc}[1m"; dim="${esc}[2m"; cyan="${esc}[36m"
+    green="${esc}[32m"; yellow="${esc}[33m"; red="${esc}[31m"; reset="${esc}[0m"
+  fi
+  # ancho de la terminal para recortar lineas largas; si no se sabe, no se recorta
+  if [ -t 1 ]; then
+    cols=${COLUMNS:-}
+    [ -n "$cols" ] || cols=$(stty size 2>/dev/null </dev/tty | cut -d' ' -f2)
+    [ -n "$cols" ] || cols=$(tput cols 2>/dev/null)
+    case "$cols" in ''|*[!0-9]*) cols=0 ;; esac
+  fi
+}
 
-# funciones de awk compartidas: relleno y dias desde una fecha YYYY-MM-DD (T = hoy)
+# mensajes: + hecho, - quitado, ! aviso, x error. Con --plain, los avisos van a stderr
+ok() { printf '%s\n' "$green+$reset $*"; }
+removed() { if [ -n "$plain" ]; then echo "- $*" >&2; else printf '%s\n' "$dim- $*$reset"; fi; }
+warn() { printf '%s\n' "$yellow!$reset $*"; }
+diag() { printf '%s\n' "$yellow!$reset $*" >&2; }
+die() { printf '%s\n' "${red}x$reset $*" >&2; exit 1; }
+# aviso temporal en stderr mientras algo tarda (fetch); se borra con unbusy
+busy_msg=
+busy() { [ -z "$plain" ] && [ -t 2 ] || return 0; busy_msg=$*; printf '%s' "$dim$*$reset" >&2; }
+unbusy() { [ -n "$busy_msg" ] || return 0; printf '\r%*s\r' "${#busy_msg}" '' >&2; busy_msg=; }
+
+# funciones de awk compartidas: relleno, fechas (T = hoy), nombres de rama y recorte
 awk_lib='
+BEGIN { BYTES = (length("\303\261") == 2) }
 function fill(s, w) { s = s ""; while (length(s) < w) s = s " "; return s }
 function dnum(s,   y, m, d, era, yoe, doy) {
   if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) return -1
@@ -66,6 +92,34 @@ function dnum(s,   y, m, d, era, yoe, doy) {
   return era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
 }
 function age(s,   n) { n = dnum(s); return n < 0 ? "" : dnum(T) - n }
+# antiguedad corta: hoy, 3d, 2sem, 5m, 1a
+function rel(s,   a) {
+  a = age(s); if (a == "") return ""
+  if (a <= 0) return "hoy"
+  if (a < 14) return a "d"
+  if (a < 60) return int(a / 7) "sem"
+  if (a < 730) return int(a / 30) "m"
+  return int(a / 365) "a"
+}
+# rama con el prefijo tenue y el ultimo tramo resaltado: feature/sc-1/ + login
+function bname(b,   p) {
+  p = b; sub(/[^\/]*$/, "", p)
+  return D p Z B C substr(b, length(p) + 1) Z
+}
+# largo visible (sin colores) y recorte a w columnas con "..."
+function vlen(s) { gsub(/\033\[[0-9;]*m/, "", s); return length(s) }
+function clip(s, w,   out, i, c, n, j) {
+  if (w <= 0 || vlen(s) <= w) return s
+  out = ""; n = 0
+  for (i = 1; i <= length(s) && n < w - 3; i++) {
+    c = substr(s, i, 1)
+    if (c == "\033") { j = index(substr(s, i), "m"); out = out substr(s, i, j); i += j - 1; continue }
+    out = out c; n++
+  }
+  # awk por bytes (mawk): no dejar un caracter UTF-8 partido
+  if (BYTES) while (out != "" && substr(out, length(out), 1) >= "\200") out = substr(out, 1, length(out) - 1)
+  return out "..." (index(s, "\033") ? "\033[0m" : "")
+}
 # inversa de dnum: numero de dia -> YYYY-MM-DD
 function fromdays(z,   era, doe, yoe, y, doy, mp, d, m) {
   era = int(z / 146097); doe = z - era * 146097
@@ -103,7 +157,7 @@ function parse_due(s,   t, wd, w, k) {
 count() { awk 'END { print NR }' "$1"; }
 line_at() { awk -v n="$2" 'NR == n + 1' "$1"; }
 del_line() { awk -v n="$2" 'NR != n + 1' "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
-need_index() { case "$1" in ''|*[!0-9]*) echo "falta el indice"; exit 1 ;; esac; }
+need_index() { case "$1" in ''|*[!0-9]*) die "falta el indice" ;; esac; }
 # lee lineas por stdin y las manda a la papelera de $1, que guarda las ultimas 50
 to_trash() {
   cat >> "$1-trash"
@@ -150,20 +204,20 @@ untouched() { [ -n "$2" ] && [ "$(git rev-parse -q --verify "refs/heads/$1")" = 
 notes() { awk -F'\t' -v b="$1" '$2 == b { n++ } END { print n + 0 }' "$memos"; }
 
 show_notes() {
-  awk -F'\t' -v b="$1" -v Y="$yellow" -v D="$dim" -v Z="$reset" '
+  awk -F'\t' -v b="$1" -v D="$dim" -v Z="$reset" -v COLS="$cols" -v T="$today" "$awk_lib"'
     $2 == b { t = $3; for (k = 4; k <= NF; k++) t = t "\t" $k
-              printf "  %s-%s %s  %s#%d%s\n", Y, Z, t, D, NR - 1, Z }' "$memos"
+              print clip("  " D "#" (NR - 1) Z "  " t, COLS) }' "$memos"
 }
 
 # manda a la papelera todas las notas de una rama
 drop_notes() {
   [ "$(notes "$1")" = 0 ] && return 0
-  awk -F'\t' -v b="$1" -v D="$dim" -v Z="$reset" '
-    $2 == b { t = $3; for (k = 4; k <= NF; k++) t = t "\t" $k
-              print "    " D "nota borrada:" Z " " t }' "$memos"
+  awk -F'\t' -v b="$1" '
+    $2 == b { t = $3; for (k = 4; k <= NF; k++) t = t "\t" $k; print t }' "$memos" |
+    while IFS= read -r t; do removed "  nota borrada: $t"; done
   awk -F'\t' -v b="$1" '$2 == b' "$memos" | to_trash "$memos"
   awk -F'\t' -v b="$1" '$2 != b' "$memos" > "$memos.tmp" && mv "$memos.tmp" "$memos"
-  echo "    ${dim}(git memo undo para recuperar)$reset"
+  [ -n "$plain" ] || echo "  ${dim}(git memo undo para recuperar)$reset"
 }
 
 # quita notas y entradas de ramas borradas; sin "quick", tambien las ramas
@@ -173,7 +227,7 @@ clean() {
   if [ -n "$gone" ]; then
     printf '%s\n' "$gone" | while IFS= read -r b; do
       exists "$b" && continue
-      echo "  ${dim}limpiada: notas de $b (ya no existe)$reset"
+      removed "limpiada: notas de $b (ya no existe)"
       drop_notes "$b"
     done
   fi
@@ -181,12 +235,12 @@ clean() {
   while IFS="$tab" read -r b d p; do
     [ -n "$b" ] || continue
     if ! exists "$b"; then
-      echo "  ${dim}limpiada: $b (ya no existe)$reset"; continue
+      removed "limpiada: $b (ya no existe)"; continue
     fi
     # en cuanto la rama recibe commits deja de estar intacta
     untouched "$b" "$p" || p=
     if [ "$1" != quick ] && [ -z "$p" ] && [ "$(notes "$b")" = 0 ] && merged "$b"; then
-      echo "  ${dim}limpiada: $b (ya en $base)$reset"
+      removed "limpiada: $b (ya en $base)"
     else
       printf '%s\t%s%s\n' "$b" "$d" "${p:+$tab$p}" >> "$parked.tmp"
     fi
@@ -204,10 +258,20 @@ clean() {
 
 # ---------- park ----------
 
-# una fila por rama: indice, [fecha] y [story] con ancho fijo al principio, luego el
-# nombre corto y, entre parentesis, ya en <base>, N notas, hace N dias
+# repo, rama base y cuantas hay estacionadas
+park_header() {
+  [ -z "$plain" ] || return 0
+  n=$(awk 'NF { n++ } END { print n + 0 }' "$parked")
+  case "$n" in 0) w="sin ramas estacionadas" ;; 1) w="1 estacionada" ;; *) w="$n estacionadas" ;; esac
+  name=$(git rev-parse --show-toplevel 2>/dev/null); name=${name##*/}
+  echo "$bold${name:-repo}$reset  ${dim}base $base, $w$reset"
+}
+
+# una fila por rama: indice, antiguedad, [story] y, con -t, el estado contra cada destino,
+# todo con ancho fijo; luego la rama y, entre parentesis, ya en <base>, N notas, etc.
+# Con --plain: indice, rama, fecha, story, estado, notas, bloqueada y destino=estado
 park_list() {
-  [ -s "$parked" ] || { echo "  $dim(sin ramas estacionadas)$reset"; return 0; }
+  [ -s "$parked" ] || return 0
   while IFS="$tab" read -r b d p; do
     [ -n "$b" ] || continue
     # m: 1 = ya en la base, 2 = todavia sin commits propios
@@ -228,39 +292,40 @@ park_list() {
     if [ -f "$dir/locked-branches" ] && grep -qxF -e "$b" "$dir/locked-branches"; then lk=1; fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$b" "$d" "$m" "$(notes "$b")" "$lk" "$tw"
   done < "$parked" | PARK_PATTERN="$pattern" awk -F'\t' -v T="$today" -v W="$stale" -v BASE="$base" \
+    -v P="$plain" -v COLS="$cols" \
     -v B="$bold" -v D="$dim" -v C="$cyan" -v G="$green" -v Y="$yellow" -v R="$red" -v Z="$reset" "$awk_lib"'
     function add(s) { meta = meta (meta == "" ? "" : D ", " Z) s }
     function word(c) { return c == "y" ? "entro" : (c == "l" ? "limpio" : (c == "c" ? "conflicto" : "no existe")) }
     function tint(c) { return c == "y" ? G : (c == "l" ? D : (c == "c" ? R : Y)) }
-    BEGIN { P = ENVIRON["PARK_PATTERN"] }
-    { br[NR] = $1; dt[NR] = $2; mg[NR] = $3; nt[NR] = $4
-      lk[NR] = $5
-      tn = split($6, ts, " "); tp[NR] = ""; tc[NR] = ""
-      for (k = 1; k <= tn; k++) {
-        split(ts[k], kv, ":"); sp = (k > 1 ? "  " : "")
-        tp[NR] = tp[NR] sp kv[1] ": " word(kv[2])
-        tc[NR] = tc[NR] sp D kv[1] ": " Z tint(kv[2]) word(kv[2]) Z
-      }
-      if (length(tp[NR]) > TW) TW = length(tp[NR])
-      s = ""; if (P != "" && match($1, P)) s = substr($1, RSTART, RLENGTH)
+    BEGIN { PT = ENVIRON["PARK_PATTERN"] }
+    { br[NR] = $1; dt[NR] = $2; mg[NR] = $3; nt[NR] = $4; lk[NR] = $5; tw[NR] = $6
+      s = ""; if (PT != "" && match($1, PT)) s = substr($1, RSTART, RLENGTH)
       st[NR] = s; if (length(s) > S) S = length(s) }
     END {
       I = length((NR - 1) "")
       for (i = 1; i <= NR; i++) {
+        tn = split(tw[i], ts, " ")
+        if (P != "") {
+          line = (i - 1) "\t" br[i] "\t" dt[i] "\t" st[i] "\t" \
+            (mg[i] == 1 ? "en-base" : (mg[i] == 2 ? "sin-commits" : "pendiente")) "\t" nt[i] "\t" lk[i]
+          for (k = 1; k <= tn; k++) { split(ts[k], kv, ":"); w = word(kv[2]); sub(/ /, "-", w); line = line "\t" kv[1] "=" w }
+          print line; continue
+        }
         a = age(dt[i]); old = (a != "" && a >= W)
-        line = "  " D fill(i - 1, I) Z "  "
-        line = line (old ? Y : D) fill(dt[i] != "" ? "[" dt[i] "]" : "", 12) Z "  "
+        line = "  " D fill(i - 1, I) Z "  " (old ? Y : D) fill(rel(dt[i]), 4) Z "  "
         if (S) line = line D fill(st[i] != "" ? "[" st[i] "]" : "", S + 2) Z "  "
-        if (TW) line = line tc[i] fill("", TW - length(tp[i])) "  "
-        short = br[i]; sub(/.*\//, "", short)
-        line = line B C short Z
+        # cada destino ocupa lo mismo en todas las filas: "staging: conflicto"
+        for (k = 1; k <= tn; k++) {
+          split(ts[k], kv, ":")
+          line = line D kv[1] ": " Z tint(kv[2]) fill(word(kv[2]), 9) Z "  "
+        }
+        line = line bname(br[i])
         meta = ""
         if (lk[i] == 1) add(Y "bloqueada" Z)
         if (mg[i] == 1) add(G "ya en " BASE Z)
         if (mg[i] == 2) add(D "sin commits" Z)
         if (nt[i] == 1) add(Y "1 nota" Z); else if (nt[i] > 1) add(Y nt[i] " notas" Z)
-        if (old) add(Y "hace " a " dias" Z)
-        print line (meta == "" ? "" : "  " D "(" Z meta D ")" Z)
+        print clip(line (meta == "" ? "" : "  " D "(" Z meta D ")" Z), COLS)
       }
     }'
 }
@@ -271,21 +336,22 @@ global_count() {
                         else if (n > 1) print n " notas globales (memo -g)" }' "$gmemos"
 }
 
-# + N stashes, N notas globales, en una sola linea tenue
+# tambien: N stashes, N notas globales, en una sola linea tenue
 footer() {
+  [ -z "$plain" ] || return 0
   s=$(git stash list | awk 'END { print NR }'); parts=
   if [ "$s" = 1 ]; then parts="1 stash"; elif [ "$s" -gt 1 ]; then parts="$s stashes"; fi
   if [ -z "$nested" ]; then
     g=$(global_count)
     [ -n "$g" ] && parts="${parts:+$parts, }$g"
   fi
-  if [ -n "$parts" ]; then echo; echo "  $dim+ $parts$reset"; fi
+  if [ -n "$parts" ]; then echo; echo "  ${dim}tambien: $parts$reset"; fi
 }
 
 pick() {
   need_index "$1"
   b=$(line_at "$parked" "$1" | cut -f1)
-  [ -n "$b" ] || { echo "no hay indice $1"; exit 1; }
+  [ -n "$b" ] || die "no hay indice $1"
 }
 
 go() { git switch "$b" || exit 1; show_notes "$b"; }
@@ -300,7 +366,7 @@ uso: git park [ls]            limpia y lista las ramas estacionadas
      git park note N texto    anota en la rama N sin saltar a ella (acepta --due)
      git park --all           todos los repos bajo park.root
 
-     git memo [ls]       lista las notas (y debajo las globales)
+     git memo [ls]       lista las notas por rama (y debajo las globales)
      git memo texto...   anota en la rama actual
      git memo add texto  lo mismo, para notas que empiezan con un subcomando
      git memo --due <cuando> texto   con fecha limite: YYYY-MM-DD, +3, hoy, manana, viernes
@@ -311,6 +377,8 @@ uso: git park [ls]            limpia y lista las ramas estacionadas
      git memo edit       abre el archivo de notas en el editor
      git memo -g ...     lo mismo con las notas globales
      git memo --all      todos los repos bajo park.root
+
+     --plain             en park, memo y sus listas: salida separada por tabs, sin colores
 
 config: park.base, park.remote, park.twinTargets, park.storyPattern, park.root,
         park.staleDays, park.color
@@ -326,35 +394,42 @@ current() {
   echo "${cb:--}"
 }
 
-# $1 = archivo, $2 = rama para filtrar (opcional), $3 = no vacio para mostrar la rama
-# muestra siempre el indice real
+# $1 = archivo, $2 = rama para filtrar (opcional), $3 = no vacio para agrupar por rama,
+# $4 = rama actual (su grupo va primero), $5 = sangria sin grupos ("  "). Indice real.
+# Con --plain: indice, creada, limite, rama y texto
 memo_list() {
-  [ -s "$1" ] || { echo "  $dim(sin notas)$reset"; return 0; }
-  awk -F'\t' -v only="$2" -v R="$3" -v T="$today" -v W="$stale" \
-    -v D="$dim" -v Y="$yellow" -v Z="$reset" "$awk_lib"'
+  if [ ! -s "$1" ]; then [ -n "$plain" ] || echo "  $dim(sin notas)$reset"; return 0; fi
+  awk -F'\t' -v only="$2" -v GR="$3" -v CUR="$4" -v T="$today" -v W="$stale" -v P="$plain" \
+    -v IND="${5:-  }" -v COLS="$cols" -v B="$bold" -v C="$cyan" -v D="$dim" -v Y="$yellow" -v R="$red" -v Z="$reset" "$awk_lib"'
+    function row(i, ind,   a, old, left, dm, hot, line) {
+      a = age(dt[i]); old = (du[i] == "" && a != "" && a >= W); dm = ""; hot = old ? Y : D
+      if (du[i] != "") {
+        left = dnum(du[i]) - dnum(T)
+        if (left < 0) { dm = R "vencio hace " (-left) (left == -1 ? " dia" : " dias") Z; hot = R }
+        else if (left == 0) { dm = Y "vence hoy" Z; hot = Y }
+        else if (left == 1) dm = "vence manana"
+        else dm = D "vence " du[i] Z
+      }
+      line = ind D fill(ix[i], I) Z "  " hot fill(rel(dt[i]), 4) Z "  " tx[i] \
+        (dm == "" ? "" : "  " D "(" Z dm D ")" Z)
+      print clip(line, COLS)
+    }
     NF == 0 { next }
     only != "" && $2 != only { next }
     { c++; ix[c] = (NR - 1) ""; split($1, p, "@"); dt[c] = p[1]; du[c] = p[2]; br[c] = $2
       t = $3; for (k = 4; k <= NF; k++) t = t "\t" $k
       tx[c] = t; if (length(ix[c]) > I) I = length(ix[c]) }
     END {
+      if (P != "") { for (i = 1; i <= c; i++) print ix[i] "\t" dt[i] "\t" du[i] "\t" br[i] "\t" tx[i]; exit }
       if (!c) { print "  " D "(sin notas)" Z; exit }
-      for (i = 1; i <= c; i++) {
-        a = age(dt[i]); old = (du[i] == "" && a != "" && a >= W)
-        meta = ""; hot = old
-        if (R != "") { b = br[i]; sub(/.*\//, "", b); meta = D (b == "-" ? "sin rama" : b) Z }
-        if (old) meta = meta (meta == "" ? "" : D ", " Z) Y "hace " a " dias" Z
-        if (du[i] != "") {
-          left = dnum(du[i]) - dnum(T)
-          if (left < 0) dm = Y "vencio hace " (-left) (left == -1 ? " dia" : " dias") Z
-          else if (left == 0) dm = Y "vence hoy" Z
-          else if (left == 1) dm = Y "vence manana" Z
-          else dm = D "vence " du[i] Z
-          if (left <= 0) hot = 1
-          meta = meta (meta == "" ? "" : D ", " Z) dm
-        }
-        print "  " D fill(ix[i], I) Z "  " (hot ? Y : D) "[" dt[i] "]" Z "  " tx[i] \
-          (meta == "" ? "" : "  " D "(" Z meta D ")" Z)
+      if (GR == "") { for (i = 1; i <= c; i++) row(i, IND); exit }
+      # un grupo por rama: la actual primero, luego en el orden en que aparecen
+      for (i = 1; i <= c; i++) if (br[i] == CUR) { ord[++ng] = CUR; seen[CUR] = 1; break }
+      for (i = 1; i <= c; i++) if (!(br[i] in seen)) { seen[br[i]] = 1; ord[++ng] = br[i] }
+      for (g = 1; g <= ng; g++) {
+        h = ord[g] == "-" ? D "sin rama" Z : bname(ord[g])
+        print clip("  " h (ord[g] == CUR ? "  " D "(actual)" Z : ""), COLS)
+        for (i = 1; i <= c; i++) if (br[i] == ord[g]) row(i, "    ")
       }
     }' "$1"
 }
@@ -363,65 +438,71 @@ memo_list() {
 memo_add() {
   due=
   if [ "$1" = --due ]; then
-    [ $# -ge 2 ] || { echo "uso: git memo --due <cuando> texto..."; exit 1; }
+    [ $# -ge 2 ] || die "uso: git memo --due <cuando> texto..."
     due=$(awk -v T="$today" -v s="$2" "$awk_lib"'BEGIN { print parse_due(s) }')
-    [ -n "$due" ] || { echo "fecha no valida: $2 (usa YYYY-MM-DD, +N, hoy, manana o un dia de la semana)"; exit 1; }
+    [ -n "$due" ] || die "fecha no valida: $2 (usa YYYY-MM-DD, +N, hoy, manana o un dia de la semana)"
     shift 2
   fi
   text=$(printf '%s\n' "$*" | tr '\t' ' ' | tr -d '\r' | awk '
     { gsub(/^ +| +$/, "") }
     $0 != "" { printf "%s%s", (n++ ? " / " : ""), $0 }')
-  [ -n "$text" ] || { echo "falta el texto"; exit 1; }
+  [ -n "$text" ] || die "falta el texto"
   printf '%s\t%s\t%s\n' "$today${due:+@$due}" "$(current)" "$text" >> "$mfile"
-  echo "anotada: $(($(count "$mfile") - 1))${due:+ (vence $due)}"
+  ok "anotada: $(($(count "$mfile") - 1))${due:+ (vence $due)}"
 }
 
 memo_main() {
+  scoped= global=
+  while :; do
+    case "$1" in --plain) plain=1; shift ;; -g) global=1; shift ;; *) break ;; esac
+  done
+  case "$1" in ls|.|trash) if [ "$2" = --plain ]; then plain=1; fi ;; esac
+  setup_out
   if [ "$1" = --all ]; then all memo; return 0; fi
-  scoped=
-  if [ "$1" = -g ]; then shift; mfile=$gmemos
+  if [ -n "$global" ]; then mfile=$gmemos
   elif in_repo; then mfile=$memos; scoped=1
   else mfile=$gmemos; fi
   touch "$mfile" "$mfile-trash"
   case "$1" in
     ""|ls)
-      [ -n "$scoped" ] && clean quick
-      memo_list "$mfile" "" "$scoped"
+      cb=
+      if [ -n "$scoped" ]; then clean quick; cb=$(git branch --show-current); fi
+      memo_list "$mfile" "" "$scoped" "$cb"
       # dentro de un repo, las globales van debajo como recordatorio
-      if [ -n "$scoped" ] && [ -s "$gmemos" ]; then
-        echo; echo "  ${yellow}globales$reset"; memo_list "$gmemos" "" ""
+      if [ -n "$scoped" ] && [ -z "$plain" ] && [ -s "$gmemos" ]; then
+        echo; echo "  ${yellow}globales$reset"; memo_list "$gmemos" "" "" "" "    "
       fi ;;
     .)
-      [ -n "$scoped" ] || { echo "memo . solo funciona dentro de un repo"; exit 1; }
-      clean quick; memo_list "$mfile" "$(current)" 1 ;;
+      [ -n "$scoped" ] || die "memo . solo funciona dentro de un repo"
+      clean quick; memo_list "$mfile" "$(current)" 1 "$(current)" ;;
     rm)
       need_index "$2"
       line=$(line_at "$mfile" "$2")
-      [ -n "$line" ] || { echo "no hay indice $2"; exit 1; }
+      [ -n "$line" ] || die "no hay indice $2"
       del_line "$mfile" "$2"
       printf '%s\n' "$line" | to_trash "$mfile"
-      echo "borrada: $(printf '%s' "$line" | cut -f3-)" ;;
+      removed "borrada: $(printf '%s' "$line" | cut -f3-)" ;;
     trash)
-      [ -s "$mfile-trash" ] || { echo "  $dim(papelera vacia)$reset"; return 0; }
-      memo_list "$mfile-trash" "" "$scoped" ;;
+      if [ ! -s "$mfile-trash" ]; then [ -n "$plain" ] || echo "  $dim(papelera vacia)$reset"; return 0; fi
+      memo_list "$mfile-trash" "" "$scoped" "" ;;
     undo)
-      [ -s "$mfile-trash" ] || { echo "la papelera esta vacia"; exit 1; }
+      [ -s "$mfile-trash" ] || die "la papelera esta vacia"
       n=${2:-$(($(count "$mfile-trash") - 1))}
       need_index "$n"
       line=$(line_at "$mfile-trash" "$n")
-      [ -n "$line" ] || { echo "no hay indice $n"; exit 1; }
+      [ -n "$line" ] || die "no hay indice $n"
       del_line "$mfile-trash" "$n"
       b=$(printf '%s' "$line" | cut -f2)
       t=$(printf '%s' "$line" | cut -f3-)
       # si la rama ya no existe, la nota vuelve sin rama para que la limpieza no la borre otra vez
       if [ -n "$scoped" ] && [ "$b" != - ] && ! exists "$b"; then
         line=$(printf '%s' "$line" | awk -F'\t' -v OFS='\t' '{ $2 = "-" } 1')
-        echo "restaurada sin rama ($b ya no existe): $t"
+        ok "restaurada sin rama ($b ya no existe): $t"
       else
-        echo "restaurada: $t"
+        ok "restaurada: $t"
       fi
       printf '%s\n' "$line" >> "$mfile"
-      echo "  indice: $(($(count "$mfile") - 1))" ;;
+      echo "  ${dim}indice: $(($(count "$mfile") - 1))$reset" ;;
     edit)
       ${VISUAL:-${EDITOR:-vi}} "$mfile" ;;
     add)
@@ -436,8 +517,9 @@ memo_main() {
 
 # $1 = park | memo: recorre park.root y sus carpetas hijas
 all() {
+  [ -z "$plain" ] || die "--plain no funciona con --all"
   if [ -z "$root" ] || [ ! -d "$root" ]; then
-    echo "configura la carpeta de tus repos: git config --global park.root <ruta>"; exit 1
+    die "configura la carpeta de tus repos: git config --global park.root <ruta>"
   fi
   for d in "$root" "$root"/*/; do
     [ -d "$d/.git" ] || continue
@@ -445,17 +527,18 @@ all() {
       cd "$d" && in_repo || exit 0
       if [ "$1" = memo ]; then f=$memos; else f=$parked; fi
       [ -s "$f" ] || exit 0
-      echo; echo "$bold$(basename "$PWD")$reset"
+      echo
       nested=1
-      if [ "$1" = memo ]; then clean quick; memo_list "$memos" "" 1
-      else clean; park_list; footer; fi
+      if [ "$1" = memo ]; then
+        clean quick; echo "$bold$(basename "$PWD")$reset"; memo_list "$memos" "" 1 ""
+      else clean; park_header; park_list; footer; fi
     )
   done
   if [ "$1" = memo ]; then
-    if [ -s "$gmemos" ]; then echo; echo "${yellow}globales$reset"; memo_list "$gmemos" "" ""; fi
+    if [ -s "$gmemos" ]; then echo; echo "${yellow}globales$reset"; memo_list "$gmemos" "" "" ""; fi
   else
     g=$(global_count)
-    if [ -n "$g" ]; then echo; echo "  $dim+ $g$reset"; fi
+    if [ -n "$g" ]; then echo; echo "  ${dim}tambien: $g$reset"; fi
   fi
 }
 
@@ -463,25 +546,38 @@ all() {
 
 # git-memo (el envoltorio de al lado) entra por aqui; tambien sirve una copia con ese nombre
 case "${0##*/}" in git-memo*) memo_main "$@"; exit 0 ;; esac
+[ "$1" = memo ] && { shift; memo_main "$@"; exit 0; }
+
+# -t y --plain van antes del subcomando, o despues de ls
+twin=
+while :; do
+  case "$1" in -t) twin=1; shift ;; --plain) plain=1; shift ;; *) break ;; esac
+done
+if [ "$1" = ls ]; then
+  shift
+  for a in "$@"; do
+    case "$a" in -t) twin=1 ;; --plain) plain=1 ;; *) usage >&2; exit 1 ;; esac
+  done
+  set -- ls
+fi
+setup_out
 
 case "$1" in
-  memo) shift; memo_main "$@"; exit 0 ;;
   --all) all park; exit 0 ;;
   -h|--help|help) usage; exit 0 ;;
 esac
 
-in_repo || { echo "no estas dentro de un repo de git"; exit 1; }
-twin=
-if [ "$1" = -t ]; then twin=1; shift; fi
-if [ "$1" = ls ] && [ "$2" = -t ]; then twin=1; fi
+in_repo || die "no estas dentro de un repo de git"
 case "$1" in
   ""|ls)
     if [ -n "$twin" ]; then
+      busy "buscando en $remote..."
       # shellcheck disable=SC2086
-      git fetch -q "$remote" $targets 2>/dev/null ||
-        echo "  ${yellow}!$reset no se pudo hacer fetch, se compara contra lo ultimo descargado"
+      git fetch -q "$remote" $targets 2>/dev/null; fetched=$?
+      unbusy
+      [ "$fetched" = 0 ] || diag "no se pudo hacer fetch, se compara contra lo ultimo descargado"
     fi
-    clean; park_list; footer ;;
+    clean; park_header; park_list; footer ;;
   note)
     pick "$2"; shift 2
     mfile=$memos; scoped=1; forbranch=$b
@@ -490,20 +586,20 @@ case "$1" in
     clean "$2" ;;
   add)
     b=${2:-$(git branch --show-current)}
-    [ -n "$b" ] || { echo "no estas en una rama"; exit 1; }
-    exists "$b" || { echo "no existe la rama $b"; exit 1; }
-    if cut -f1 "$parked" | grep -qxF -e "$b"; then echo "ya estaba: $b"
+    [ -n "$b" ] || die "no estas en una rama"
+    exists "$b" || die "no existe la rama $b"
+    if cut -f1 "$parked" | grep -qxF -e "$b"; then warn "ya estaba: $b"
     else
       # sin commits propios todavia: se guarda el commit para no limpiarla como "ya en la base"
       p=; merged "$b" && p=$(git rev-parse "refs/heads/$b")
-      printf '%s\t%s%s\n' "$b" "$today" "${p:+$tab$p}" >> "$parked"; echo "estacionada: $b"
+      printf '%s\t%s%s\n' "$b" "$today" "${p:+$tab$p}" >> "$parked"; ok "estacionada: $b"
     fi ;;
   rm)
-    pick "$2"; del_line "$parked" "$2"; echo "quitada: $b"; drop_notes "$b" ;;
+    pick "$2"; del_line "$parked" "$2"; removed "quitada: $b"; drop_notes "$b" ;;
   go)
     pick "$2"; go ;;
   *[!0-9]*)
-    usage; exit 1 ;;
+    usage >&2; exit 1 ;;
   *)
     pick "$1"; go ;;
 esac

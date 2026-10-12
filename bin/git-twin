@@ -2,7 +2,11 @@
 # git twin: chequeo previo a los PRs. Simula el merge de una rama contra cada rama
 # destino del remoto, sin tocar el working tree. Solo lee (hace fetch).
 #
-#   git twin [rama]     sin argumento revisa HEAD
+#   git twin [rama]           sin argumento revisa HEAD
+#   git twin --plain [rama]   destino<TAB>estado<TAB>archivos en conflicto (separados por coma)
+#                             estado: entro | limpio | conflicto | no-existe
+#
+# Salida: "+" mergea o ya entro, "x" conflicto, "!" aviso.
 #
 # Configuracion con git config (global o por repo):
 #   park.twinTargets   destinos, separados por espacio y en el orden de tus PRs:
@@ -14,13 +18,40 @@
 #
 # Requiere git 2.38 o mayor (merge-tree --write-tree).
 
+plain=
+for a in "$@"; do
+  shift
+  if [ "$a" = --plain ]; then plain=1; else set -- "$@" "$a"; fi
+done
+
 cfg() { git config --get "$1" 2>/dev/null; }
-git rev-parse --git-dir >/dev/null 2>&1 || { echo "no estas dentro de un repo de git"; exit 1; }
+bold= dim= cyan= green= yellow= red= reset=
+if [ -z "$plain" ]; then
+  case "$(cfg park.color)" in
+    always) usecolor=1 ;;
+    never) usecolor= ;;
+    *) usecolor=; [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && usecolor=1 ;;
+  esac
+  if [ -n "$usecolor" ]; then
+    esc=$(printf '\033')
+    bold="${esc}[1m"; dim="${esc}[2m"; cyan="${esc}[36m"; green="${esc}[32m"
+    yellow="${esc}[33m"; red="${esc}[31m"; reset="${esc}[0m"
+  fi
+fi
+die() { printf '%s\n' "${red}x$reset $*" >&2; exit 1; }
+# los avisos son parte del informe; con --plain van a stderr
+warn() { if [ -n "$plain" ]; then echo "! $*" >&2; else echo "  ${yellow}!$reset $*"; fi; }
+busy_msg=
+busy() { [ -z "$plain" ] && [ -t 2 ] || return 0; busy_msg=$*; printf '%s' "$dim$*$reset" >&2; }
+unbusy() { [ -n "$busy_msg" ] || return 0; printf '\r%*s\r' "${#busy_msg}" '' >&2; busy_msg=; }
+out() { [ -n "$plain" ] || printf '%s\n' "$*"; }
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "no estas dentro de un repo de git"
 git merge-tree --write-tree HEAD HEAD >/dev/null 2>&1 ||
-  { echo "git twin necesita git 2.38 o mayor (tienes $(git --version | cut -d' ' -f3))"; exit 1; }
+  die "git twin necesita git 2.38 o mayor (tienes $(git --version | cut -d' ' -f3))"
 
 b=${1:-HEAD}
-name=$(git rev-parse --abbrev-ref "$b" 2>/dev/null) || { echo "no existe: $b"; exit 1; }
+name=$(git rev-parse --abbrev-ref "$b" 2>/dev/null) || die "no existe: $b"
 
 remote=$(cfg park.remote); remote=${remote:-origin}
 base=$(cfg park.base)
@@ -34,70 +65,68 @@ if [ -z "$base" ]; then
 fi
 targets=$(git config --get-all park.twinTargets 2>/dev/null | tr '\n' ' ')
 [ -n "${targets# }" ] || targets=$base
-
-bold= dim= cyan= green= yellow= red= reset=
-case "$(cfg park.color)" in
-  always) usecolor=1 ;;
-  never) usecolor= ;;
-  *) usecolor=; [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && usecolor=1 ;;
-esac
-if [ -n "$usecolor" ]; then
-  esc=$(printf '\033')
-  bold="${esc}[1m"; dim="${esc}[2m"; cyan="${esc}[36m"; green="${esc}[32m"
-  yellow="${esc}[33m"; red="${esc}[31m"; reset="${esc}[0m"
-fi
-warn() { echo "  ${yellow}!$reset $1"; }
 has() { git show-ref -q --verify "refs/remotes/$remote/$1"; }
 
-echo
+busy "buscando en $remote..."
 # shellcheck disable=SC2086
-git fetch -q "$remote" $targets $base 2>/dev/null ||
-  warn "no se pudo hacer fetch, se compara contra lo ultimo descargado"
+git fetch -q "$remote" $targets $base 2>/dev/null; fetched=$?
+unbusy
+[ "$fetched" = 0 ] || warn "no se pudo hacer fetch, se compara contra lo ultimo descargado"
 
-# encabezado: rama corta, story y commits sobre la base
+# encabezado: rama con el prefijo tenue, story y commits sobre la base
 story=
 pattern=$(cfg park.storyPattern)
 [ -n "$pattern" ] && story=$(printf '%s\n' "$name" | grep -oE -e "$pattern" | head -n 1)
-echo "${bold}${cyan}${name##*/}${reset}${story:+  $dim$story$reset}"
+case "$name" in */*) prefix=${name%/*}/ ;; *) prefix= ;; esac
+out "$dim$prefix$reset$bold$cyan${name##*/}$reset${story:+  $dim$story$reset}"
 if has "$base"; then
   n=$(git rev-list --count --no-merges "$remote/$base..$b")
   if [ "$n" = 1 ]; then w=commit; else w=commits; fi
-  echo "${dim}$n $w sobre $base$reset"
+  out "${dim}$n $w sobre $base$reset"
 fi
-echo
+out ""
 # solo archivos trackeados
 if [ "$b" = HEAD ] && ! git diff --quiet HEAD 2>/dev/null; then
-  warn "hay cambios sin commitear; el chequeo solo ve lo commiteado"; echo
+  warn "hay cambios sin commitear; el chequeo solo ve lo commiteado"; out ""
 fi
 
 width=0
 for t in $targets; do [ ${#t} -gt "$width" ] && width=${#t}; done
-pad=$(printf '%*s' $((width + 5)) '')
+pad=$(printf '%*s' $((width + 6)) '')
 
 # simula el merge a cada destino
 entered= missing=
 for t in $targets; do
   if ! has "$t"; then
-    printf '  %-*s  %s! no existe en %s%s\n' "$width" "$t" "$yellow" "$remote" "$reset"; continue
+    if [ -n "$plain" ]; then printf '%s\tno-existe\t\n' "$t"
+    else printf '  %s!%s %-*s  no existe en %s\n' "$yellow" "$reset" "$width" "$t" "$remote"; fi
+    continue
   fi
-  if out=$(git merge-tree --write-tree --name-only "$remote/$t" "$b" 2>/dev/null); then
-    if [ "$(printf '%s\n' "$out" | head -n 1)" = "$(git rev-parse "$remote/$t^{tree}")" ]; then
+  if res=$(git merge-tree --write-tree --name-only "$remote/$t" "$b" 2>/dev/null); then
+    if [ "$(printf '%s\n' "$res" | head -n 1)" = "$(git rev-parse "$remote/$t^{tree}")" ]; then
       entered="${entered:+$entered, }$t"
-      printf '  %-*s  %sok  ya entro%s\n' "$width" "$t" "$green" "$reset"
+      if [ -n "$plain" ]; then printf '%s\tentro\t\n' "$t"
+      else printf '  %s+%s %-*s  %sya entro%s\n' "$green" "$reset" "$width" "$t" "$green" "$reset"; fi
     else
       missing="${missing:+$missing, }$t"
-      printf '  %-*s  %sok%s  mergea limpio\n' "$width" "$t" "$green" "$reset"
+      if [ -n "$plain" ]; then printf '%s\tlimpio\t\n' "$t"
+      else printf '  %s+%s %-*s  mergea limpio\n' "$green" "$reset" "$width" "$t"; fi
     fi
   else
     missing="${missing:+$missing, }$t"
-    printf '  %-*s  %sX   conflicto en:%s\n' "$width" "$t" "$red" "$reset"
-    printf '%s\n' "$out" | awk -v p="$pad" -v d="$dim" -v z="$reset" \
-      'NR == 1 { next } /^$/ { exit } { print p d $0 z }'
+    # la salida de merge-tree: arbol, archivos en conflicto, linea vacia, mensajes
+    files=$(printf '%s\n' "$res" | awk 'NR == 1 { next } /^$/ { exit } { print }')
+    if [ -n "$plain" ]; then
+      printf '%s\tconflicto\t%s\n' "$t" "$(printf '%s\n' "$files" | awk 'NF { printf "%s%s", (n++ ? "," : ""), $0 }')"
+    else
+      printf '  %sx%s %-*s  %sconflicto en:%s\n' "$red" "$reset" "$width" "$t" "$red" "$reset"
+      printf '%s\n' "$files" | awk -v p="$pad" -v d="$dim" -v z="$reset" 'NF { print p d $0 z }'
+    fi
   fi
 done
 
 # el paso que mas se olvida: ya entro a un destino y falta el PR a otro
-[ -n "$entered" ] && [ -n "$missing" ] && echo "  ${yellow}-> falta el PR a $missing$reset"
+if [ -n "$entered" ] && [ -n "$missing" ]; then out ""; warn "falta el PR a $missing"; fi
 # commits de otro destino que no estan en la base: stacking, o la rama nacio de ese destino
 if has "$base"; then
   for t in $targets; do
@@ -108,9 +137,9 @@ if has "$base"; then
     n=$(git rev-list --count --no-merges "$remote/$base..$mb")
     [ "$n" -gt 0 ] || continue
     if [ "$n" = 1 ]; then w="1 commit de $t que no esta"; else w="$n commits de $t que no estan"; fi
-    warn "trae $w en $base"
-    echo "    ${dim}stacking sobre otra rama, o nacio de $t$reset"
+    out ""; warn "trae $w en $base"
+    out "    ${dim}stacking sobre otra rama, o nacio de $t$reset"
   done
 fi
-echo
+out ""
 exit 0

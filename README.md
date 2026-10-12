@@ -127,12 +127,18 @@ git config park.twinTargets "staging main"
 ## park
 
 ```
-  0  [2026-09-30]  [sc-100619]  refactor-x  (1 nota, hace 9 dias)
-  1  [2026-10-09]  [sc-77]      corto
-  2  [2026-10-09]               squashed  (ya en main, 1 nota)
+mi-repo  base main, 3 estacionadas
+  0  9d    [sc-100619]  feature/sc-100619/refactor-x  (1 nota)
+  1  hoy   [sc-77]      fix/sc-77/corto
+  2  2sem               squashed  (ya en main, 1 nota)
 
-  + 1 stash, 1 nota global (memo -g)
+  tambien: 1 stash, 1 nota global (memo -g)
 ```
+
+La segunda columna es la antiguedad (`hoy`, `3d`, `2sem`, `5m`, `1a`); se pone en
+amarillo a partir de `park.staleDays`. De cada rama se resalta el ultimo tramo y el
+prefijo (`feature/sc-100619/`) va tenue. Si una linea no cabe en la terminal, se
+recorta con `...`.
 
 | comando | que hace |
 |---|---|
@@ -148,8 +154,9 @@ Con `-t` hace fetch y agrega una columna por destino: `entro` (ya esta todo ahi)
 `limpio` (mergea sin conflicto) o `conflicto`.
 
 ```
-  0  [2026-10-09]  [sc-100619]  staging: entro  main: limpio      refactor-x  (1 nota)
-  1  [2026-10-09]  [sc-77]      staging: conflicto  main: limpio  choca
+mi-repo  base main, 2 estacionadas
+  0  hoy   [sc-100619]  staging: entro      main: limpio     feature/refactor-x  (1 nota)
+  1  hoy   [sc-77]      staging: conflicto  main: limpio     fix/choca
 ```
 
 Limpieza automatica al listar: se quitan las ramas que ya no existen y las que ya
@@ -173,24 +180,50 @@ hasta que reciba alguno.
 | `memo -g ...` | lo mismo con las notas globales |
 | `memo --all` | todos los repos bajo `park.root` |
 
-Las notas con fecha limite muestran `vence ...` y se marcan en amarillo el dia que
-vencen. Fuera de un repo, `memo` usa las globales. La papelera guarda las ultimas 50.
+```
+  feature/sc-100/login  (actual)
+    0  hoy   revisar migracion antes del deploy
+    1  3d    avisar a QA  (vence hoy)
+  main
+    2  2sem  revisar el deploy  (vencio hace 2 dias)
+
+  globales
+    0  1m    renovar certificado
+```
+
+Las notas van agrupadas por rama, con la rama actual primero. El numero de la
+izquierda es el que usan `memo rm` y `memo undo`. Las fechas limite se marcan en
+amarillo el dia que vencen y en rojo cuando ya vencieron. Fuera de un repo, `memo`
+usa las globales. La papelera guarda las ultimas 50.
 
 ## up
 
+```
++ main: 3 commits nuevos
+= staging: al dia
+```
+
 `git up` actualiza las ramas de `park.upBranches`; `git up main staging` las que le
-pases. Nunca fuerza: si una rama local tiene commits propios, avisa y no la toca.
-Si una rama no existe en local, la crea desde el remoto.
+pases. No te cambia de rama y nunca fuerza: si una rama local tiene commits propios,
+avisa y no la toca. Si una rama no existe en local, la crea desde el remoto.
 
 ## twin
 
 ```
-limpia  sc-12
+feature/sc-12/limpia  sc-12
 1 commit sobre main
 
-  staging  ok  ya entro
-  main     ok  mergea limpio
-  -> falta el PR a main
+  + staging  ya entro
+  + main     mergea limpio
+
+  ! falta el PR a main
+```
+
+Con conflicto, debajo del destino van los archivos que chocan:
+
+```
+  x main     conflicto en:
+               src/app.js
 ```
 
 `git twin [rama]` solo lee. Por cada destino dice si la rama ya entro, si mergea
@@ -227,6 +260,32 @@ muestra como `bloqueada`. El bloqueo solo frena estos atajos, no `git branch -D`
 
 La forma corta hace lo mismo: `kit ss` es `kit save`. Si la rama nunca se subio,
 `del` y `redo` solo la borran en local (y `redo` la recrea igual).
+
+## Salida
+
+Solo ASCII, para que se vea igual en cualquier terminal. Los mensajes empiezan con un
+simbolo:
+
+| simbolo | significa |
+|---|---|
+| `+` | se hizo algo (estacionada, anotada, mergea limpio) |
+| `-` | se quito algo (limpiada, borrada) |
+| `=` | no hubo cambios (al dia) |
+| `!` | aviso |
+| `x` | error o conflicto |
+
+Los errores van a stderr y terminan con codigo 1. Mientras hace fetch (`park -t`,
+`twin`, `up`, `kit new`, `kit gone`) muestra una linea temporal que se borra sola.
+Los colores salen solo en terminal; `park.color=never` o `NO_COLOR` los apagan.
+
+Para scripts, `--plain` da una salida estable separada por tabs, sin colores ni
+encabezados:
+
+| comando | columnas |
+|---|---|
+| `git park --plain` | indice, rama, fecha, story, estado (`pendiente`, `en-base`, `sin-commits`), notas, bloqueada (0/1); con `-t`, un `destino=estado` por destino |
+| `git memo --plain` | indice, creada, limite, rama (`-` sin rama), texto |
+| `git twin --plain` | destino, estado (`entro`, `limpio`, `conflicto`, `no-existe`), archivos en conflicto separados por coma |
 
 ## Datos
 

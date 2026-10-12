@@ -34,17 +34,18 @@ has "memo -g" "anotada: 0" git memo -g nota global
 has "park lista story" "[sc-100]" git park
 has "park cuenta notas" "2 notas" git park
 has "park nota global" "1 nota global" git park
-has "memo lista" "correr migraciones  (uno)" git memo
+has "memo lista" "correr migraciones" git memo
+has "memo agrupa por rama" "feature/sc-100/uno  (actual)" git memo
 has "memo globales debajo" "nota global" git memo
 has "memo rm" "borrada: correr migraciones" git memo rm 0
 has "memo trash" "correr migraciones" git memo trash
 has "memo undo" "restaurada: correr migraciones" git memo undo
 git switch -q main
-has "park N salta" "- rm cosa" git park 0
+has "park N salta" "rm cosa" git park 0
 has "park en rama" "feature/sc-100/uno" git branch --show-current
 # antiguedad
 awk -F'\t' -v OFS='\t' '{ $2 = "2020-01-01" } 1' .git/parked-branches > x && mv x .git/parked-branches
-has "park viejo" "hace " git park
+if git park | grep -qE ' [0-9]+a +\[sc-100\]'; then ok "park viejo"; else bad "park viejo"; git park | sed 's/^/        /'; fi
 # rama borrada: limpia entrada y notas
 git switch -q main; git branch -qD feature/sc-100/uno
 has "limpia rama borrada" "limpiada: feature/sc-100/uno (ya no existe)" git park
@@ -69,7 +70,7 @@ has "memo --due +N" "anotada" git memo --due +1 para manana
 has "memo --due dia" "anotada" git memo --due viernes el viernes
 has "memo --due invalida" "fecha no valida" git memo --due nunca x
 git memo --due 2020-01-01 vencida >/dev/null
-has "lista vence fecha" "lejana  (main, vence 2099-01-02)" git memo
+has "lista vence fecha" "lejana  (vence 2099-01-02)" git memo
 has "lista vence hoy" "vence hoy" git memo
 has "lista vence manana" "vence manana" git memo
 has "lista vencida" "vencio hace" git memo
@@ -79,9 +80,13 @@ has "park --all" "work" git park --all
 has "park note" "anotada: 0" git park note 0 revisar sin saltar
 has "park note no salta" "main" git branch --show-current
 has "park note cuenta" "1 nota" git park
-has "park note rama" "revisar sin saltar  (otra)" git memo
+has "park note rama" "revisar sin saltar" git memo
+has "park --plain" "$(printf '0\totra\t')" git park --plain
+has "memo --plain" "$(printf '\totra\trevisar sin saltar')" git memo --plain
+has "park encabezado" "base main, 1 estacionada" git park
+out=$(git park rm 99 2>/dev/null); if [ -z "$out" ]; then ok "error a stderr"; else bad "error a stderr"; echo "        $out"; fi
 git config park.twinTargets "staging main"
-has "park -t columna" "staging: limpio  main: limpio" git park -t
+has "park -t columna" "staging: limpio     main: limpio     otra" git park -t
 git config --unset park.twinTargets
 : > .git/memos
 hasnt "sin colores en pipe" "$(printf '\033')" git park
@@ -105,7 +110,8 @@ git switch -qc choca main; printf 'l1\nMIO\nl3\n' > f; git commit -qam c
 has "twin conflicto" "conflicto en:" git twin
 git switch -q feature/sc-12/limpia; git push -q origin HEAD 2>/dev/null
 (cd "$T/seed" && git fetch -q && git switch -q staging && git merge -q --squash origin/feature/sc-12/limpia >/dev/null 2>&1 && git commit -qm sq && git push -q origin staging)
-has "twin falta PR" "-> falta el PR a main" git twin
+has "twin falta PR" "! falta el PR a main" git twin
+has "twin --plain" "$(printf 'staging\tentro\t')" git twin --plain
 git switch -qc desde-staging origin/staging 2>/dev/null; commit y
 has "twin nacida de staging" "de staging que no esta" git twin
 

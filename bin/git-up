@@ -11,7 +11,7 @@
 
 cfg() { git config --get "$1" 2>/dev/null; }
 exists() { git show-ref -q --verify "refs/heads/$1"; }
-git rev-parse --git-dir >/dev/null 2>&1 || { echo "no estas dentro de un repo de git"; exit 1; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "x no estas dentro de un repo de git" >&2; exit 1; }
 
 remote=$(cfg park.remote); remote=${remote:-origin}
 if [ $# -gt 0 ]; then branches="$*"
@@ -29,32 +29,48 @@ else
   fi
 fi
 
+# salida: "+" avanzo o se creo, "=" ya estaba al dia, "x" no se pudo (a stderr)
+cfgc=$(cfg park.color)
+dim= green= red= reset=
+if [ "$cfgc" = always ] || { [ "$cfgc" != never ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
+  esc=$(printf '\033'); dim="${esc}[2m"; green="${esc}[32m"; red="${esc}[31m"; reset="${esc}[0m"
+fi
+ok() { printf '%s\n' "$green+$reset $*"; }
+same() { printf '%s\n' "$dim= $*$reset"; }
+bad() { printf '%s\n' "${red}x$reset $*" >&2; fail=1; }
+busy_msg=
+busy() { [ -t 2 ] || return 0; busy_msg=$*; printf '%s' "$dim$*$reset" >&2; }
+unbusy() { [ -n "$busy_msg" ] || return 0; printf '\r%*s\r' "${#busy_msg}" '' >&2; busy_msg=; }
+
 cur=$(git branch --show-current)
 fail=0
 for b in $branches; do
-  if ! git fetch -q "$remote" "$b" 2>/dev/null; then
-    echo "$b: no se pudo bajar de $remote (no existe ahi, o no hay conexion)"; fail=1; continue
+  busy "bajando $b de $remote..."
+  git fetch -q "$remote" "$b" 2>/dev/null; fetched=$?
+  unbusy
+  if [ "$fetched" != 0 ]; then
+    bad "$b: no se pudo bajar de $remote (no existe ahi, o no hay conexion)"; continue
   fi
   if ! exists "$b"; then
-    if git branch -q "$b" "$remote/$b" 2>/dev/null; then echo "$b: creada desde $remote/$b"
-    else echo "$b: no se pudo crear en local"; fail=1; fi
+    if git branch -q "$b" "$remote/$b" 2>/dev/null; then ok "$b: creada desde $remote/$b"
+    else bad "$b: no se pudo crear en local"; fi
     continue
   fi
   before=$(git rev-parse "refs/heads/$b")
   if [ "$b" = "$cur" ]; then
     # la rama actual no se puede actualizar con fetch: se avanza con merge --ff-only
     if ! git merge -q --ff-only "$remote/$b" 2>/dev/null; then
-      echo "$b: no se pudo avanzar (tiene commits propios o cambios sin commitear que chocan)"; fail=1; continue
+      bad "$b: no se pudo avanzar (tiene commits propios o cambios sin commitear que chocan)"; continue
     fi
   # fetch rechaza solo si no es fast-forward o si la rama esta abierta en otro worktree
   elif ! git fetch -q "$remote" "$b:$b" 2>/dev/null; then
-    echo "$b: no se pudo avanzar (tiene commits que $remote no tiene, o esta abierta en otro worktree)"; fail=1; continue
+    bad "$b: no se pudo avanzar (tiene commits que $remote no tiene, o esta abierta en otro worktree)"; continue
   fi
   after=$(git rev-parse "refs/heads/$b")
-  if [ "$before" = "$after" ]; then echo "$b: al dia"
+  if [ "$before" = "$after" ]; then same "$b: al dia"
   else
     n=$(git rev-list --count "$before..$after")
-    if [ "$n" = 1 ]; then echo "$b: 1 commit nuevo"; else echo "$b: $n commits nuevos"; fi
+    if [ "$n" = 1 ]; then ok "$b: 1 commit nuevo"; else ok "$b: $n commits nuevos"; fi
   fi
 done
 exit $fail
